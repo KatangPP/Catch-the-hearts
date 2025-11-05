@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="theme-color" content="#ff4d8d" />
+  <meta name="description" content="Catch hearts and avoid stars! A fun mobile game." />
+  
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="manifest.json" />
+  
+  <!-- iOS PWA Support -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="LoveME" />
+  
+  <title>Catch the Hearts 💖</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --fg: #ffffff;
+      --accent: #ff4d8d;
+      --good: #ff4d8d; /* heart color */
+      --bad: #ffd54d;  /* star (bomb) color */
+      --ui: #1a2140;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif; }
+    #wrap { position: fixed; inset: 0; display: grid; grid-template-rows: 1fr auto; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+
+    /* HUD */
+    #hud { position: absolute; inset: 0.75rem 0.75rem auto 0.75rem; display: flex; justify-content: space-between; gap: .5rem; pointer-events: none; }
+    .badge { background: #ffffff14; backdrop-filter: blur(6px); border: 1px solid #ffffff22; border-radius: 999px; padding: .35rem .75rem; font-weight: 700; letter-spacing: .4px; }
+    #pauseBtn { pointer-events: auto; background: #ffffff14; backdrop-filter: blur(6px); border: 1px solid #ffffff22; border-radius: 999px; padding: .35rem .75rem; font-weight: 700; cursor: pointer; color: var(--fg); font-size: 1.1rem; }
+    #pauseBtn:hover { background: #ffffff22; }
+    #pauseBtn:active { transform: scale(0.95); }
+
+    /* Overlay (start/pause/gameover) */
+    #overlay { position: absolute; inset: 0; display: grid; place-items: center; }
+    .card { background: #ffffff0f; border: 1px solid #ffffff22; border-radius: 18px; padding: 1.25rem; width: min(520px, 92vw); text-align: center; box-shadow: 0 10px 30px #0006; }
+    .title { font-size: clamp(22px, 3.8vw, 34px); margin: 0 0 .35rem; }
+    .subtitle { margin: 0 0 1rem; opacity: .85; }
+    .gameover-image { width: 100%; max-width: 300px; height: auto; border-radius: 12px; margin: 0 auto 1rem; display: block; object-fit: contain; }
+    .image-text { font-size: clamp(18px, 2.5vw, 24px); font-weight: 700; margin: -0.5rem auto 1rem; color: var(--accent); text-align: center; }
+    .btnbar { display: flex; gap: .6rem; flex-wrap: wrap; justify-content: center; }
+    button { pointer-events: auto; background: var(--accent); color: white; border: 0; padding: .7rem 1rem; border-radius: 12px; font-weight: 700; cursor: pointer; box-shadow: 0 6px 20px #ff4d8d44; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+    button.secondary { background: var(--ui); color: #fff; box-shadow: none; border: 1px solid #ffffff22; }
+
+    /* Mobile controls (optional) */
+    #touchZones { position: absolute; inset: 0; display: none; }
+    .zone { position: absolute; inset: 0 50% 0 0; }
+    .zone.r { inset: 0 0 0 50%; }
+    @media (max-width: 900px) {
+      #touchZones { display: block; }
+    }
+
+    a { color: #a5c9ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game" aria-label="Catch the Hearts game" role="img"></canvas>
+    <div id="hud" aria-hidden="true">
+      <div class="badge" id="score">Score: 0</div>
+      <div style="display: flex; gap: .5rem; align-items: center;">
+        <div class="badge" id="lives">Lives: 3</div>
+        <button id="pauseBtn" aria-label="Pause">⏸️</button>
+      </div>
+      <div class="badge" id="best">Best: 0</div>
+    </div>
+    <div id="touchZones" aria-hidden="true">
+      <div class="zone l"></div>
+      <div class="zone r"></div>
+    </div>
+    <div id="overlay">
+      <div class="card">
+        <h1 class="title">Catch the Hearts 💖</h1>
+        <p class="subtitle">Move left/right to catch hearts and avoid the ⭐ stars.</p>
+        <div style="text-align:left; font-size: .95rem; line-height: 1.35; background:#ffffff0b; border:1px solid #ffffff22; border-radius:12px; padding:.8rem; margin:.7rem 0 1rem;">
+          <strong>Controls</strong>
+          <ul style="margin:.3rem 0 .2rem .9rem; padding:0;">
+            <li><b>PC:</b> ← → or A/D to move, <b>Space</b> to pause.</li>
+            <li><b>Phone:</b> Tap/hold left or right side of the screen.</li>
+          </ul>
+        </div>
+        <div class="btnbar">
+          <button id="playBtn">Play</button>
+          <button id="muteBtn" class="secondary">🔊 Sound On</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  // ===== Utility =====
+  const rand = (min, max) => Math.random() * (max - min) + min;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // ===== Canvas setup =====
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  function resize() {
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    canvas.width = Math.floor(canvas.clientWidth * dpr);
+    canvas.height = Math.floor(canvas.clientHeight * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
+  }
+  new ResizeObserver(resize).observe(canvas);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+
+  // ===== Game state =====
+  const state = {
+    running: false,
+    paused: false,
+    score: 0,
+    lives: 3,
+    best: Number(localStorage.getItem('hearts-best') || 0),
+    time: 0,
+    speed: 1,
+    spawnAcc: 0,
+    sound: true,
+  };
+
+  // ===== Player =====
+  const player = {
+    x: 200,
+    y: 0, // set on start
+    w: 60,
+    h: 20,
+    vx: 0,
+    speed: 5.2,
+    color: '#a5c9ff',
+  };
+
+  // ===== Entities =====
+  const hearts = [];
+  const stars = [];
+
+  // ===== Input =====
+  const keys = new Set();
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { togglePause(); return; }
+    if (['ArrowLeft','KeyA','ArrowRight','KeyD'].includes(e.code)) e.preventDefault();
+    keys.add(e.code);
+  });
+  window.addEventListener('keyup', (e) => keys.delete(e.code));
+
+  // Touch: left/right half move
+  const zones = document.getElementById('touchZones');
+  let touchDir = 0;
+  function touchHandler(e){
+    e.preventDefault();
+    const touches = e.touches;
+    touchDir = 0;
+    for (let i=0;i<touches.length;i++) {
+      const t = touches[i];
+      const x = t.clientX;
+      if (x < window.innerWidth/2) touchDir = -1; else touchDir = 1;
+    }
+  }
+  ['touchstart','touchmove'].forEach(evt => zones.addEventListener(evt, touchHandler, {passive:false}));
+  ['touchend','touchcancel'].forEach(evt => zones.addEventListener(evt, ()=>{touchDir=0;}, {passive:false}));
+
+  // ===== Sounds (tiny synth) =====
+  let audioCtx;
+  function beep(freq=660, dur=0.08, type='sine', gain=0.03){
+    if (!state.sound) return;
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type; o.frequency.value = freq;
+      g.gain.value = gain; o.connect(g); g.connect(audioCtx.destination);
+      o.start();
+      setTimeout(()=>{ o.stop(); }, dur*1000);
+    } catch { /* no audio */ }
+  }
+
+  // ===== Audio file player =====
+  const playingAudio = []; // Track all playing audio files
+  function playAudioFile(filename, loop = false){
+    if (!state.sound) return;
+    try {
+      const audio = new Audio(filename);
+      audio.volume = 0.5; // Adjust volume (0.0 to 1.0)
+      audio.loop = loop; // Enable looping if requested
+      
+      // Track this audio
+      playingAudio.push(audio);
+      
+      // Remove from tracking when it ends (only if not looping)
+      if (!loop) {
+        audio.addEventListener('ended', () => {
+          const index = playingAudio.indexOf(audio);
+          if (index > -1) playingAudio.splice(index, 1);
+        });
+      }
+      
+      audio.play().catch(() => { /* ignore playback errors */ });
+    } catch { /* no audio */ }
+  }
+  
+  function stopAllAudio(){
+    playingAudio.forEach(audio => {
+      try {
+        audio.pause();
+        audio.currentTime = 0;
+      } catch { /* ignore errors */ }
+    });
+    playingAudio.length = 0; // Clear the array
+  }
+
+  // ===== Drawing helpers =====
+  function drawHeart(x,y,size,color){
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(size/100, size/100);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(50, 30);
+    ctx.bezierCurveTo(50, 0, 0, 0, 0, 30);
+    ctx.bezierCurveTo(0, 55, 25, 72, 50, 95);
+    ctx.bezierCurveTo(75, 72, 100, 55, 100, 30);
+    ctx.bezierCurveTo(100, 0, 50, 0, 50, 30);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+  function drawStar(x,y,r,color){
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    const spikes = 5; let rot = Math.PI/2 * 3; let step = Math.PI / spikes;
+    let outer = r, inner = r*0.5; let x1 = 0, y1 = 0;
+    ctx.moveTo(0, -outer);
+    for (let i=0;i<spikes;i++){
+      x1 = Math.cos(rot) * outer; y1 = Math.sin(rot) * outer; ctx.lineTo(x1, y1); rot += step;
+      x1 = Math.cos(rot) * inner; y1 = Math.sin(rot) * inner; ctx.lineTo(x1, y1); rot += step;
+    }
+    ctx.lineTo(0, -outer); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // ===== Spawning =====
+  function spawn(){
+    // Spawn more frequently as time increases
+    const base = 700; // ms
+    const interval = Math.max(140, base - state.time * 0.03);
+    state.spawnAcc += dtMs;
+    if (state.spawnAcc >= interval){
+      state.spawnAcc = 0;
+      const isStar = Math.random() < Math.min(0.15 + state.time*0.00012, 0.45);
+      const x = rand(30, canvas.clientWidth-30);
+      const size = rand(28, 44);
+      const speed = rand(0.8, 1.3) + state.time*0.0003; // ramp over time
+      if (isStar) stars.push({x, y: -40, r: size*0.45, vy: speed});
+      else hearts.push({x, y: -40, size, vy: speed});
+    }
+  }
+
+  // ===== Update & collisions =====
+  let last = performance.now();
+  let dt = 0, dtMs = 16;
+
+  function update(){
+    const now = performance.now();
+    dtMs = now - last; last = now; dt = dtMs/16.6667; // normalize ~60fps
+    if (!state.running || state.paused) return;
+
+    state.time += dtMs;
+
+    // Player move
+    let dir = 0;
+    if (keys.has('ArrowLeft') || keys.has('KeyA')) dir -= 1;
+    if (keys.has('ArrowRight') || keys.has('KeyD')) dir += 1;
+    if (touchDir !== 0) dir = touchDir;
+    player.vx = dir * player.speed;
+    player.x += player.vx * dt * 3.5;
+    player.x = clamp(player.x, player.w/2 + 6, canvas.clientWidth - player.w/2 - 6);
+
+    // Move entities
+    for (const h of hearts) h.y += h.vy * dt * 1.8;
+    for (const s of stars) s.y += s.vy * dt * 1.8;
+
+    // Collisions with player (treat player as top edge paddle)
+    const px = player.x - player.w/2, py = player.y - player.h/2;
+
+    // Hearts
+    for (let i=hearts.length-1; i>=0; i--){
+      const h = hearts[i];
+      if (h.y > canvas.clientHeight + 80) { hearts.splice(i,1); continue; }
+      const hx = h.x, hy = h.y, r = h.size*0.42;
+      if (hy + r > py && hy - r < py + player.h && Math.abs(hx - (px + player.w/2)) < (r + player.w/2)){
+        hearts.splice(i,1);
+        state.score += 1;
+        document.getElementById('score').textContent = `Score: ${state.score}`;
+        playAudioFile('heartSound.wav'); // Replace 'heartSound.mp3' with your audio filename
+      }
+    }
+
+    // Stars (hurt)
+    for (let i=stars.length-1; i>=0; i--){
+      const s = stars[i];
+      if (s.y > canvas.clientHeight + 80) { stars.splice(i,1); continue; }
+      const sx = s.x, sy = s.y, r = s.r;
+      if (sy + r > py && sy - r < py + player.h && Math.abs(sx - (px + player.w/2)) < (r + player.w/2)){
+        stars.splice(i,1);
+        loseLife();
+      }
+    }
+
+    // Spawn new
+    spawn();
+
+    // Draw
+    render();
+    requestAnimationFrame(update);
+  }
+
+  function loseLife(){
+    state.lives -= 1; document.getElementById('lives').textContent = `Lives: ${state.lives}`;
+    flash('#ff4d8d'); beep(220, 0.08, 'square', 0.05);
+    if (state.lives <= 0) endGame();
+  }
+
+  // ===== Rendering =====
+  function render(){
+    // background gradient
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const grad = ctx.createLinearGradient(0,0,0,h);
+    grad.addColorStop(0, '#0b1020'); grad.addColorStop(1, '#141a34');
+    ctx.fillStyle = grad; ctx.fillRect(0,0,w,h);
+
+    // subtle stars background
+    ctx.globalAlpha = 0.18; ctx.fillStyle = '#ffffff';
+    for (let i=0;i<40;i++){ ctx.fillRect((i*97 + (state.time*0.02%w))%w, (i*53)%h, 2, 2); }
+    ctx.globalAlpha = 1;
+
+    // player paddle
+    ctx.fillStyle = player.color;
+    roundedRect(ctx, player.x - player.w/2, player.y - player.h/2, player.w, player.h, 8);
+    ctx.fill();
+
+    // entities
+    for (const hrt of hearts) drawHeart(hrt.x, hrt.y, hrt.size, getComputedStyle(document.documentElement).getPropertyValue('--good').trim()||'#ff4d8d');
+    for (const st of stars) drawStar(st.x, st.y, st.r, getComputedStyle(document.documentElement).getPropertyValue('--bad').trim()||'#ffd54d');
+  }
+
+  function roundedRect(ctx, x, y, w, h, r){
+    ctx.beginPath(); ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+    ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+    ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+    ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+  }
+
+  function flash(color){
+    const el = document.createElement('div');
+    el.style.position='absolute'; el.style.inset='0'; el.style.background=color; el.style.opacity='0.18';
+    el.style.transition='opacity .28s'; document.getElementById('wrap').appendChild(el);
+    requestAnimationFrame(()=>{ el.style.opacity='0'; });
+    setTimeout(()=>el.remove(), 300);
+  }
+
+  // ===== Game flow =====
+  const overlay = document.getElementById('overlay');
+  const scoreEl = document.getElementById('score');
+  const livesEl = document.getElementById('lives');
+  const bestEl = document.getElementById('best');
+  document.getElementById('muteBtn').addEventListener('click', ()=>{
+    state.sound = !state.sound;
+    document.getElementById('muteBtn').textContent = state.sound ? '🔊 Sound On' : '🔇 Sound Off';
+  });
+  // Add both click and touchstart for better mobile support
+  const playBtn = document.getElementById('playBtn');
+  playBtn.addEventListener('click', startGame);
+  playBtn.addEventListener('touchend', (e) => { e.preventDefault(); startGame(); });
+  document.getElementById('pauseBtn').addEventListener('click', togglePause);
+
+  function startGame(){
+    stopAllAudio(); // Stop any playing audio when starting a new game
+    overlay.style.display='none';
+    
+    // Ensure canvas is properly sized before starting
+    resize();
+    // Small delay to ensure mobile browsers have processed the resize
+    requestAnimationFrame(() => {
+      resize(); // Resize again after overlay is hidden
+      state.running = true; state.paused = false; state.score = 0; state.lives = 3; state.time = 0; state.spawnAcc=0;
+      scoreEl.textContent = 'Score: 0'; livesEl.textContent = 'Lives: 3'; bestEl.textContent = 'Best: ' + state.best;
+      
+      // Ensure canvas has dimensions
+      if (canvas.clientWidth === 0 || canvas.clientHeight === 0) {
+        resize();
+      }
+      
+      player.w = Math.max(50, Math.min(90, Math.floor(canvas.clientWidth*0.12)));
+      player.h = Math.max(16, Math.min(22, Math.floor(canvas.clientHeight*0.026)));
+      player.x = canvas.clientWidth/2; player.y = canvas.clientHeight - Math.max(60, canvas.clientHeight*0.08);
+      hearts.length = 0; stars.length = 0; last = performance.now();
+      requestAnimationFrame(update); render();
+    });
+  }
+
+  function endGame(){
+    state.running = false; state.paused = false;
+    if (state.score > state.best){ state.best = state.score; localStorage.setItem('hearts-best', String(state.best)); }
+    bestEl.textContent = 'Best: ' + state.best;
+    
+    // Show different image based on score (supports JPG, PNG, GIF, WEBP - including animated GIFs)
+    const imageUrl = state.score >= 30 ? 'happyCat.gif' : 'under50.webp'; // Replace with your actual image/GIF paths
+    
+    // Text to display under the image
+    const imageText = state.score >= 30 ? 'Yay!! You Love Meeee 🎉' : 'You Dont Love Me 😭';  // Customize your text here
+    
+    // Play different audio based on score
+    const audioFile = state.score >= 30 ? 'happyhappy.mp3' : 'gwenchana.mp3'; // Replace with your actual audio filenames
+    const shouldLoop = state.score >= 30; // Loop the audio if score >= 30
+    playAudioFile(audioFile, shouldLoop);
+    
+    showOverlay(`Game Over — Score ${state.score}`, `Best: ${state.best}. Tap Play to try again!`, imageUrl, imageText);
+  }
+
+  function togglePause(){
+    if (!state.running) return;
+    state.paused = !state.paused;
+    if (state.paused) {
+      showOverlay('Paused ⏸️', 'Tap ⏸️ button or Play to resume. (PC: Press Space)', null, null);
+    } else {
+      overlay.style.display='none';
+      last = performance.now();
+      requestAnimationFrame(update);
+    }
+  }
+
+  function showOverlay(title, subtitle, imageUrl = null, imageText = null){
+    const imageHtml = imageUrl ? `<img src="${imageUrl}" alt="Game result" class="gameover-image" />` : '';
+    const imageTextHtml = imageText ? `<p class="image-text">${imageText}</p>` : '';
+    overlay.innerHTML = `
+      <div class="card">
+        <h1 class="title">${title}</h1>
+        ${imageHtml}
+        ${imageTextHtml}
+        <p class="subtitle">${subtitle}</p>
+        <div class="btnbar">
+          <button id="playBtn2">Play</button>
+          <button id="muteBtn2" class="secondary">${state.sound ? '🔊 Sound On' : '🔇 Sound Off'}</button>
+        </div>
+      </div>`;
+    overlay.style.display='grid';
+    const playBtn2 = document.getElementById('playBtn2');
+    playBtn2.addEventListener('click', ()=>{ 
+      overlay.style.display='none'; 
+      state.paused = false;
+      if (!state.running) {
+        startGame();
+      } else {
+        last = performance.now();
+        requestAnimationFrame(update);
+      }
+    });
+    // Also add touch event for mobile
+    playBtn2.addEventListener('touchend', (e) => { 
+      e.preventDefault();
+      overlay.style.display='none'; 
+      state.paused = false;
+      if (!state.running) {
+        startGame();
+      } else {
+        last = performance.now();
+        requestAnimationFrame(update);
+      }
+    });
+    document.getElementById('muteBtn2').addEventListener('click', ()=>{ state.sound=!state.sound; document.getElementById('muteBtn2').textContent = state.sound ? '🔊 Sound On' : '🔇 Sound Off'; });
+  }
+
+  // Show best on load
+  bestEl.textContent = 'Best: ' + state.best;
+
+  // Initial paint so there is something on screen before playing
+  resize();
+  player.x = canvas.clientWidth/2; player.y = canvas.clientHeight - 80; render();
+
+  // Register Service Worker for PWA
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js')
+        .then((registration) => {
+          console.log('Service Worker registered:', registration);
+        })
+        .catch((error) => {
+          console.log('Service Worker registration failed:', error);
+        });
+    });
+  }
+  </script>
+</body>
+</html>

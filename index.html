@@ -102,12 +102,7 @@
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
 
-  // --- Drag flags must exist BEFORE any resize handlers can fire ---
-  let pointerActive = false;
-  let targetX = null;
-  let activePointerId = null;
-
-  // Accurate canvas sizing (accounts for iOS UI changes)
+  // Rock-solid canvas sizing for iPhone (rotation, viewport keyboard, etc.)
   function resizeCanvasAccurate(){
     const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
     const vw = Math.floor(document.documentElement.clientWidth);
@@ -118,17 +113,10 @@
     canvas.height = Math.floor(vh * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
   }
-
-  // While holding, avoid resizing to prevent drift (defensive if early)
-  function safeResize() {
-    if (typeof pointerActive !== 'undefined' && pointerActive) return;
-    resizeCanvasAccurate();
-  }
-
-  window.addEventListener('resize', () => setTimeout(safeResize, 50));
-  window.addEventListener('orientationchange', () => setTimeout(safeResize, 200));
+  window.addEventListener('resize', () => setTimeout(resizeCanvasAccurate, 50));
+  window.addEventListener('orientationchange', () => setTimeout(resizeCanvasAccurate, 200));
   if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', () => setTimeout(safeResize, 50));
+    window.visualViewport.addEventListener('resize', () => setTimeout(resizeCanvasAccurate, 50));
   }
 
   // ===== Game state =====
@@ -169,7 +157,10 @@
   });
   window.addEventListener('keyup', (e) => keys.delete(e.code));
 
-  // --- Direct, stable drag on canvas (pointer events + capture) ---
+  // --- Smooth drag on canvas (pointer events) ---
+  let pointerActive = false;
+  let targetX = null;
+
   function canvasXFromClient(clientX) {
     const rect = canvas.getBoundingClientRect();
     return clientX - rect.left;
@@ -177,34 +168,24 @@
 
   canvas.addEventListener('pointerdown', (e) => {
     pointerActive = true;
-    activePointerId = e.pointerId;
-    canvas.setPointerCapture?.(e.pointerId);
     targetX = canvasXFromClient(e.clientX);
-    e.preventDefault(); // avoid iOS gestures/scroll
+    e.preventDefault(); // avoid iOS gestures
   });
 
   canvas.addEventListener('pointermove', (e) => {
     if (!pointerActive) return;
-    if (activePointerId != null && e.pointerId !== activePointerId) return;
     targetX = canvasXFromClient(e.clientX);
     e.preventDefault();
   }, { passive: false });
 
-  function endPointer() {
-    try { if (activePointerId != null) canvas.releasePointerCapture?.(activePointerId); } catch {}
-    pointerActive = false;
-    activePointerId = null;
-    targetX = null;
-  }
-  window.addEventListener('pointerup', endPointer);
-  window.addEventListener('pointercancel', endPointer);
+  window.addEventListener('pointerup', () => { pointerActive = false; });
 
-  // Touch: left/right half move zones (disabled while dragging)
+  // Touch: left/right half move zones
   const zones = document.getElementById('touchZones');
   let touchDir = 0;
   function touchHandler(e){
     e.preventDefault();
-    if (pointerActive) return; // dragging wins
+    if (pointerActive) return; // if dragging, ignore zones
     const touches = e.touches;
     touchDir = 0;
     for (let i=0;i<touches.length;i++) {
@@ -216,13 +197,13 @@
   ['touchstart','touchmove'].forEach(evt => zones.addEventListener(evt, touchHandler, {passive:false}));
   ['touchend','touchcancel'].forEach(evt => zones.addEventListener(evt, ()=>{touchDir=0;}, {passive:false}));
 
-  // Legacy touchmove support (if pointer events missing)
+  // Extra: smooth finger drag directly on canvas (legacy support if pointer events missing)
   canvas.addEventListener('touchmove', (e) => {
     if (!state.running || state.paused) return;
     const t = e.touches[0];
     const rect = canvas.getBoundingClientRect();
     const x = t.clientX - rect.left;
-    targetX = x;
+    targetX = x; // use same easing path
     e.preventDefault();
   }, { passive: false });
 
@@ -249,7 +230,8 @@
     } catch {}
     try {
       const a = new Audio();
-      a.src = 'data:audio/mp3;base64,//uQZAAAAAAAAAAAAAAAAAAAA'; // tiny silent blip
+      // 1-frame silent sound to prime HTMLAudio pipeline
+      a.src = 'data:audio/mp3;base64,//uQZAAAAAAAAAAAAAAAAAAAA';
       a.play().catch(()=>{});
     } catch {}
     window.removeEventListener('touchend', unlockAudioOnce);
@@ -286,6 +268,38 @@
     playingAudio.length = 0;
   }
 
+  // ===== Drawing helpers =====
+  function drawHeart(x,y,size,color){
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(size/100, size/100);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(50, 30);
+    ctx.bezierCurveTo(50, 0, 0, 0, 0, 30);
+    ctx.bezierCurveTo(0, 55, 25, 72, 50, 95);
+    ctx.bezierCurveTo(75, 72, 100, 55, 100, 30);
+    ctx.bezierCurveTo(100, 0, 50, 0, 50, 30);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+  function drawStar(x,y,r,color){
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    const spikes = 5; let rot = Math.PI/2 * 3; let step = Math.PI / spikes;
+    let outer = r, inner = r*0.5; let x1 = 0, y1 = 0;
+    ctx.moveTo(0, -outer);
+    for (let i=0;i<spikes;i++){
+      x1 = Math.cos(rot) * outer; y1 = Math.sin(rot) * outer; ctx.lineTo(x1, y1); rot += step;
+      x1 = Math.cos(rot) * inner; y1 = Math.sin(rot) * inner; ctx.lineTo(x1, y1); rot += step;
+    }
+    ctx.lineTo(0, -outer); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
   // ===== Spawning =====
   function spawn(){
     // Spawn more slowly on mobile, ramp over time
@@ -318,16 +332,17 @@
 
     state.time += dtMs;
 
-    // Player move (direct follow when dragging; else keys/zones)
+    // Player move (smooth pointer drag + fallback to keys/zones)
     let dir = 0;
     if (keys.has('ArrowLeft') || keys.has('KeyA')) dir -= 1;
     if (keys.has('ArrowRight') || keys.has('KeyD')) dir += 1;
     if (touchDir !== 0) dir = touchDir;
 
     if (pointerActive && targetX != null) {
+      const ease = 0.50 * dt; // increase to 0.45–0.55 for snappier feel
       const clampedTarget = clamp(targetX, player.w/2 + 6, canvas.clientWidth - player.w/2 - 6);
-      player.x = clampedTarget;   // direct lock under finger
-      player.vx = 0;
+      player.x += (clampedTarget - player.x) * ease;
+      player.vx = 0; // ignore keyboard velocity while dragging
     } else {
       player.vx = dir * player.speed;
       player.x += player.vx * dt * 3.5;

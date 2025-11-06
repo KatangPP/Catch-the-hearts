@@ -82,7 +82,7 @@
           <strong>Controls</strong>
           <ul style="margin:.3rem 0 .2rem .9rem; padding:0;">
             <li><b>PC:</b> ← → or A/D to move, <b>Space</b> to pause.</li>
-            <li><b>Phone:</b> Tap/hold left or right side of the screen, or drag on the canvas.</li>
+            <li><b>Phone:</b> Tap/hold left or right side, or drag on the canvas.</li>
           </ul>
         </div>
         <div class="btnbar">
@@ -157,11 +157,35 @@
   });
   window.addEventListener('keyup', (e) => keys.delete(e.code));
 
+  // --- Smooth drag on canvas (pointer events) ---
+  let pointerActive = false;
+  let targetX = null;
+
+  function canvasXFromClient(clientX) {
+    const rect = canvas.getBoundingClientRect();
+    return clientX - rect.left;
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    pointerActive = true;
+    targetX = canvasXFromClient(e.clientX);
+    e.preventDefault(); // avoid iOS gestures
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!pointerActive) return;
+    targetX = canvasXFromClient(e.clientX);
+    e.preventDefault();
+  }, { passive: false });
+
+  window.addEventListener('pointerup', () => { pointerActive = false; });
+
   // Touch: left/right half move zones
   const zones = document.getElementById('touchZones');
   let touchDir = 0;
   function touchHandler(e){
     e.preventDefault();
+    if (pointerActive) return; // if dragging, ignore zones
     const touches = e.touches;
     touchDir = 0;
     for (let i=0;i<touches.length;i++) {
@@ -173,13 +197,13 @@
   ['touchstart','touchmove'].forEach(evt => zones.addEventListener(evt, touchHandler, {passive:false}));
   ['touchend','touchcancel'].forEach(evt => zones.addEventListener(evt, ()=>{touchDir=0;}, {passive:false}));
 
-  // Extra: smooth finger drag directly on canvas (mobile friendly)
+  // Extra: smooth finger drag directly on canvas (legacy support if pointer events missing)
   canvas.addEventListener('touchmove', (e) => {
     if (!state.running || state.paused) return;
     const t = e.touches[0];
     const rect = canvas.getBoundingClientRect();
     const x = t.clientX - rect.left;
-    player.x = clamp(x, player.w/2 + 6, canvas.clientWidth - player.w/2 - 6);
+    targetX = x; // use same easing path
     e.preventDefault();
   }, { passive: false });
 
@@ -300,19 +324,30 @@
 
   function update(){
     const now = performance.now();
-    dtMs = now - last; last = now; dt = dtMs/16.6667; // normalize ~60fps
+    dtMs = Math.min(now - last, 40); // cap step to reduce sudden jumps
+    last = now;
+    dt = dtMs/16.6667; // normalize ~60fps
+
     if (!state.running || state.paused) return;
 
     state.time += dtMs;
 
-    // Player move
+    // Player move (smooth pointer drag + fallback to keys/zones)
     let dir = 0;
     if (keys.has('ArrowLeft') || keys.has('KeyA')) dir -= 1;
     if (keys.has('ArrowRight') || keys.has('KeyD')) dir += 1;
     if (touchDir !== 0) dir = touchDir;
-    player.vx = dir * player.speed;
-    player.x += player.vx * dt * 3.5;
-    player.x = clamp(player.x, player.w/2 + 6, canvas.clientWidth - player.w/2 - 6);
+
+    if (pointerActive && targetX != null) {
+      const ease = 0.38 * dt; // increase to 0.45–0.55 for snappier feel
+      const clampedTarget = clamp(targetX, player.w/2 + 6, canvas.clientWidth - player.w/2 - 6);
+      player.x += (clampedTarget - player.x) * ease;
+      player.vx = 0; // ignore keyboard velocity while dragging
+    } else {
+      player.vx = dir * player.speed;
+      player.x += player.vx * dt * 3.5;
+      player.x = clamp(player.x, player.w/2 + 6, canvas.clientWidth - player.w/2 - 6);
+    }
 
     // Move entities
     for (const h of hearts) h.y += h.vy * dt * 1.8;

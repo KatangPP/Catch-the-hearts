@@ -339,7 +339,7 @@
     if (touchDir !== 0) dir = touchDir;
 
     if (pointerActive && targetX != null) {
-      const ease = 0.38 * dt; // increase to 0.45–0.55 for snappier feel
+      const ease = 0.45 * dt; // increase to 0.45–0.55 for snappier feel
       const clampedTarget = clamp(targetX, player.w/2 + 6, canvas.clientWidth - player.w/2 - 6);
       player.x += (clampedTarget - player.x) * ease;
       player.vx = 0; // ignore keyboard velocity while dragging

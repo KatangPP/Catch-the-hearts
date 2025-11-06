@@ -7,7 +7,7 @@
   <meta name="description" content="Catch hearts and avoid stars! A fun mobile game." />
   
   <!-- PWA Manifest -->
-  <link rel="manifest" href="manifest.json" />
+  <link rel="manifest" href="./manifest.json" />
   
   <!-- iOS PWA Support -->
   <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -82,7 +82,7 @@
           <strong>Controls</strong>
           <ul style="margin:.3rem 0 .2rem .9rem; padding:0;">
             <li><b>PC:</b> ← → or A/D to move, <b>Space</b> to pause.</li>
-            <li><b>Phone:</b> Tap/hold left or right side of the screen.</li>
+            <li><b>Phone:</b> Tap/hold left or right side of the screen, or drag on the canvas.</li>
           </ul>
         </div>
         <div class="btnbar">
@@ -102,14 +102,22 @@
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
 
-  function resize() {
+  // Rock-solid canvas sizing for iPhone (rotation, viewport keyboard, etc.)
+  function resizeCanvasAccurate(){
     const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-    canvas.width = Math.floor(canvas.clientWidth * dpr);
-    canvas.height = Math.floor(canvas.clientHeight * dpr);
+    const vw = Math.floor(document.documentElement.clientWidth);
+    const vh = Math.floor(window.visualViewport ? window.visualViewport.height : document.documentElement.clientHeight);
+    canvas.style.width = vw + 'px';
+    canvas.style.height = vh + 'px';
+    canvas.width = Math.floor(vw * dpr);
+    canvas.height = Math.floor(vh * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
   }
-  new ResizeObserver(resize).observe(canvas);
-  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+  window.addEventListener('resize', () => setTimeout(resizeCanvasAccurate, 50));
+  window.addEventListener('orientationchange', () => setTimeout(resizeCanvasAccurate, 200));
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => setTimeout(resizeCanvasAccurate, 50));
+  }
 
   // ===== Game state =====
   const state = {
@@ -122,6 +130,7 @@
     speed: 1,
     spawnAcc: 0,
     sound: true,
+    mobileSpawnSlow: false,
   };
 
   // ===== Player =====
@@ -139,7 +148,7 @@
   const hearts = [];
   const stars = [];
 
-  // ===== Input =====
+  // ===== Input (keys) =====
   const keys = new Set();
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space') { togglePause(); return; }
@@ -148,7 +157,7 @@
   });
   window.addEventListener('keyup', (e) => keys.delete(e.code));
 
-  // Touch: left/right half move
+  // Touch: left/right half move zones
   const zones = document.getElementById('touchZones');
   let touchDir = 0;
   function touchHandler(e){
@@ -164,7 +173,17 @@
   ['touchstart','touchmove'].forEach(evt => zones.addEventListener(evt, touchHandler, {passive:false}));
   ['touchend','touchcancel'].forEach(evt => zones.addEventListener(evt, ()=>{touchDir=0;}, {passive:false}));
 
-  // ===== Sounds (tiny synth) =====
+  // Extra: smooth finger drag directly on canvas (mobile friendly)
+  canvas.addEventListener('touchmove', (e) => {
+    if (!state.running || state.paused) return;
+    const t = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    const x = t.clientX - rect.left;
+    player.x = clamp(x, player.w/2 + 6, canvas.clientWidth - player.w/2 - 6);
+    e.preventDefault();
+  }, { passive: false });
+
+  // ===== Sounds (tiny synth + HTMLAudio) =====
   let audioCtx;
   function beep(freq=660, dur=0.08, type='sine', gain=0.03){
     if (!state.sound) return;
@@ -179,38 +198,50 @@
     } catch { /* no audio */ }
   }
 
-  // ===== Audio file player =====
-  const playingAudio = []; // Track all playing audio files
+  // Audio unlock for iOS: run once on first gesture
+  function unlockAudioOnce() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+    } catch {}
+    try {
+      const a = new Audio();
+      // 1-frame silent sound to prime HTMLAudio pipeline
+      a.src = 'data:audio/mp3;base64,//uQZAAAAAAAAAAAAAAAAAAAA';
+      a.play().catch(()=>{});
+    } catch {}
+    window.removeEventListener('touchend', unlockAudioOnce);
+    window.removeEventListener('click', unlockAudioOnce);
+  }
+  window.addEventListener('touchend', unlockAudioOnce, { once: true });
+  window.addEventListener('click', unlockAudioOnce, { once: true });
+
+  // HTMLAudio file player (track & stop)
+  const playingAudio = [];
   function playAudioFile(filename, loop = false){
     if (!state.sound) return;
     try {
       const audio = new Audio(filename);
-      audio.volume = 0.5; // Adjust volume (0.0 to 1.0)
-      audio.loop = loop; // Enable looping if requested
-      
-      // Track this audio
+      audio.volume = 0.5;
+      audio.loop = loop;
       playingAudio.push(audio);
-      
-      // Remove from tracking when it ends (only if not looping)
       if (!loop) {
         audio.addEventListener('ended', () => {
           const index = playingAudio.indexOf(audio);
           if (index > -1) playingAudio.splice(index, 1);
         });
       }
-      
-      audio.play().catch(() => { /* ignore playback errors */ });
-    } catch { /* no audio */ }
+      audio.play().catch(() => {});
+    } catch {}
   }
-  
   function stopAllAudio(){
     playingAudio.forEach(audio => {
       try {
         audio.pause();
         audio.currentTime = 0;
-      } catch { /* ignore errors */ }
+      } catch {}
     });
-    playingAudio.length = 0; // Clear the array
+    playingAudio.length = 0;
   }
 
   // ===== Drawing helpers =====
@@ -247,16 +278,17 @@
 
   // ===== Spawning =====
   function spawn(){
-    // Spawn more frequently as time increases
-    const base = 700; // ms
-    const interval = Math.max(140, base - state.time * 0.03);
+    // Spawn more slowly on mobile, ramp over time
+    const base = state.mobileSpawnSlow ? 850 : 700; // ms
+    const interval = Math.max(160, base - state.time * 0.03);
     state.spawnAcc += dtMs;
     if (state.spawnAcc >= interval){
       state.spawnAcc = 0;
-      const isStar = Math.random() < Math.min(0.15 + state.time*0.00012, 0.45);
+      const starChance = Math.min(0.15 + state.time*0.00012, state.mobileSpawnSlow ? 0.35 : 0.45);
+      const isStar = Math.random() < starChance;
       const x = rand(30, canvas.clientWidth-30);
       const size = rand(28, 44);
-      const speed = rand(0.8, 1.3) + state.time*0.0003; // ramp over time
+      const speed = (state.mobileSpawnSlow ? 0.75 : 0.8) + state.time*0.0003; // ramp
       if (isStar) stars.push({x, y: -40, r: size*0.45, vy: speed});
       else hearts.push({x, y: -40, size, vy: speed});
     }
@@ -298,7 +330,7 @@
         hearts.splice(i,1);
         state.score += 1;
         document.getElementById('score').textContent = `Score: ${state.score}`;
-        playAudioFile('heartSound.wav'); // Replace 'heartSound.mp3' with your audio filename
+        playAudioFile('./heartSound.wav'); // local asset
       }
     }
 
@@ -370,36 +402,47 @@
   const scoreEl = document.getElementById('score');
   const livesEl = document.getElementById('lives');
   const bestEl = document.getElementById('best');
-  document.getElementById('muteBtn').addEventListener('click', ()=>{
+  const muteBtn = document.getElementById('muteBtn');
+
+  muteBtn.addEventListener('click', ()=>{
     state.sound = !state.sound;
-    document.getElementById('muteBtn').textContent = state.sound ? '🔊 Sound On' : '🔇 Sound Off';
+    muteBtn.textContent = state.sound ? '🔊 Sound On' : '🔇 Sound Off';
   });
-  // Add both click and touchstart for better mobile support
+
   const playBtn = document.getElementById('playBtn');
   playBtn.addEventListener('click', startGame);
   playBtn.addEventListener('touchend', (e) => { e.preventDefault(); startGame(); });
+
   document.getElementById('pauseBtn').addEventListener('click', togglePause);
 
   function startGame(){
-    stopAllAudio(); // Stop any playing audio when starting a new game
+    unlockAudioOnce();              // ensure audio is unlocked on iOS
+    stopAllAudio();                 // stop anything looping from prior run
     overlay.style.display='none';
-    
-    // Ensure canvas is properly sized before starting
-    resize();
-    // Small delay to ensure mobile browsers have processed the resize
+
+    // Ensure canvas is sized properly before starting
+    resizeCanvasAccurate();
+
     requestAnimationFrame(() => {
-      resize(); // Resize again after overlay is hidden
+      resizeCanvasAccurate(); // once more after overlay hides
+
       state.running = true; state.paused = false; state.score = 0; state.lives = 3; state.time = 0; state.spawnAcc=0;
       scoreEl.textContent = 'Score: 0'; livesEl.textContent = 'Lives: 3'; bestEl.textContent = 'Best: ' + state.best;
-      
-      // Ensure canvas has dimensions
-      if (canvas.clientWidth === 0 || canvas.clientHeight === 0) {
-        resize();
-      }
-      
-      player.w = Math.max(50, Math.min(90, Math.floor(canvas.clientWidth*0.12)));
-      player.h = Math.max(16, Math.min(22, Math.floor(canvas.clientHeight*0.026)));
-      player.x = canvas.clientWidth/2; player.y = canvas.clientHeight - Math.max(60, canvas.clientHeight*0.08);
+
+      // Configure for mobile comfort
+      const isMobile = canvas.clientWidth <= 820;
+      state.mobileSpawnSlow = isMobile;
+
+      // Paddle sizing
+      player.w = isMobile ? Math.floor(canvas.clientWidth * 0.18) : Math.floor(canvas.clientWidth * 0.12);
+      player.h = isMobile ? Math.floor(canvas.clientHeight * 0.032) : Math.floor(canvas.clientHeight * 0.026);
+      player.w = Math.max(60, Math.min(120, player.w));
+      player.h = Math.max(16, Math.min(26, player.h));
+
+      // Start near bottom
+      player.x = canvas.clientWidth/2;
+      player.y = canvas.clientHeight - Math.max(60, canvas.clientHeight*0.08);
+
       hearts.length = 0; stars.length = 0; last = performance.now();
       requestAnimationFrame(update); render();
     });
@@ -410,15 +453,13 @@
     if (state.score > state.best){ state.best = state.score; localStorage.setItem('hearts-best', String(state.best)); }
     bestEl.textContent = 'Best: ' + state.best;
     
-    // Show different image based on score (supports JPG, PNG, GIF, WEBP - including animated GIFs)
-    const imageUrl = state.score >= 30 ? 'happyCat.gif' : 'under50.webp'; // Replace with your actual image/GIF paths
-    
-    // Text to display under the image
-    const imageText = state.score >= 30 ? 'Yay!! You Love Meeee 🎉' : 'You Dont Love Me 😭';  // Customize your text here
-    
-    // Play different audio based on score
-    const audioFile = state.score >= 30 ? 'happyhappy.mp3' : 'gwenchana.mp3'; // Replace with your actual audio filenames
-    const shouldLoop = state.score >= 30; // Loop the audio if score >= 30
+    // Show different image based on score
+    const imageUrl = state.score >= 30 ? './happyCat.gif' : './under50.webp';
+    const imageText = state.score >= 30 ? 'Yay!! You Love Meeee 🎉' : 'You Dont Love Me 😭';
+
+    // Play different audio based on score (loop only if >= 30)
+    const audioFile = state.score >= 30 ? './happyhappy.mp3' : './gwenchana.mp3';
+    const shouldLoop = state.score >= 30;
     playAudioFile(audioFile, shouldLoop);
     
     showOverlay(`Game Over — Score ${state.score}`, `Best: ${state.best}. Tap Play to try again!`, imageUrl, imageText);
@@ -462,7 +503,6 @@
         requestAnimationFrame(update);
       }
     });
-    // Also add touch event for mobile
     playBtn2.addEventListener('touchend', (e) => { 
       e.preventDefault();
       overlay.style.display='none'; 
@@ -474,20 +514,21 @@
         requestAnimationFrame(update);
       }
     });
-    document.getElementById('muteBtn2').addEventListener('click', ()=>{ state.sound=!state.sound; document.getElementById('muteBtn2').textContent = state.sound ? '🔊 Sound On' : '🔇 Sound Off'; });
+    document.getElementById('muteBtn2').addEventListener('click', ()=>{
+      state.sound=!state.sound;
+      document.getElementById('muteBtn2').textContent = state.sound ? '🔊 Sound On' : '🔇 Sound Off';
+    });
   }
 
-  // Show best on load
+  // Show best on load + initial paint
   bestEl.textContent = 'Best: ' + state.best;
-
-  // Initial paint so there is something on screen before playing
-  resize();
+  resizeCanvasAccurate();
   player.x = canvas.clientWidth/2; player.y = canvas.clientHeight - 80; render();
 
-  // Register Service Worker for PWA
+  // Register Service Worker for PWA (scoped correctly for GitHub Pages subpath)
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('./sw.js')
+      navigator.serviceWorker.register('./sw.js', { scope: './' })
         .then((registration) => {
           console.log('Service Worker registered:', registration);
         })
